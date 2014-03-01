@@ -44,11 +44,11 @@ def main():
 
     # Go throught each pageid 
     for pageid in rm_curssor:
-        print pageid
         # Find url, title, description
-        get_page_info(pageid[0])
-        #get_textblock_info(pageid[0])
-        get_image_info(pageid[0],pageid[1])
+        inserted_page_id = get_page_info(pageid[0])
+        print '%s - %s' % (pageid[0],inserted_page_id)
+        get_image_info(pageid[0], inserted_page_id)
+        get_textblock_info(pageid[0], inserted_page_id)
 
 
 
@@ -98,25 +98,33 @@ def get_page_info(pageid):
     # Save it to local database
     # First, get url to see if it is exist or not
     result = list(rm_curssor.fetchall())
+    
+    # Select to see if the url existed or not
     lc_cursor.execute("""
         SELECT
-            url
+            id
         FROM
             article
         WHERE
             url = '%s'
         """ % result[0][0])
-
+    
+    #import pdb; pdb.set_trace();
+    
     if (lc_cursor.rowcount == 0):
-        # Then, if it not exist, save it to local database
+        # Then, if it not exist, save it to local database and return the inserted row id
         lc_cursor.execute("""
             INSERT INTO
                 article (url, subsiteid, title, description, is_narrative, is_lesson_plan, is_biography, is_essay, is_record, is_index)
             VALUES 
                 (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """ , (result[0][0], result[0][1], result[0][2], result[0][3], result[0][4], result[0][5], result[0][6], result[0][7], result[0][8], result[0][9]))
+        return lc_cursor.lastrowid
+    else:
+        # Else, return the id of that row
+        return list(lc_cursor.fetchone())[0]
 
-def get_image_info(pageid, subsiteid):
+def get_image_info(pageid, inserted_page_id):
      # Connect
     rm_db = MySQLdb.connect(host=RM_HOST_NAME,
             user=RM_USER_NAME,
@@ -127,6 +135,11 @@ def get_image_info(pageid, subsiteid):
             passwd=LC_USER_PWD,
             db=lc_database_name)
 
+    # Cursors
+    lc_cursor = lc_db.cursor();
+    rm_curssor = rm_db.cursor();
+    
+    # Step 1 - Get image data 
     rm_curssor.execute("""
         SELECT 
             concat('www.ohs.org',subsites.imagesurl, sitepages.filename) as src, 
@@ -142,13 +155,143 @@ def get_image_info(pageid, subsiteid):
         INNER JOIN subsites
         ON subsites.id = sitepages.subsiteid
         WHERE 
-            data_image.pageid = %s
+            data_image.pageid = data_imagewithcaption.pageid 
             AND data_image.datelastcurrent is null
             AND data_imagewithcaption.datelastcurrent is null
-            AND sitepages.subsiteid = %s
             AND data_imagewithcaption.pageid = %s
-        """ % (pageid, subsiteid, pageid))
+        LIMIT 50000
+        """ % (pageid))
+
+    # Step 2 - Save data into local database
+    for image_data in rm_curssor:
+        # Step 2a - Check if the data exists or not
+        lc_cursor.execute("""
+            SELECT
+                id
+            FROM 
+                image
+            WHERE
+                src = '%s'
+            """ % image_data[0])
+
+        if (lc_cursor.rowcount == 0):
+            # Step 2b - Insert new data since it not exist.
+            lc_cursor.execute("""
+                    INSERT INTO
+                        image (src, caption)
+                    VALUES 
+                        (%s, %s)
+                """ , (image_data[0], image_data[1]))
+
+            # Step 2c - Insert new data into article_image table
+            image_id = lc_cursor.lastrowid
+
+            lc_cursor.execute("""
+                    INSERT INTO
+                        article_image (article_id, image_id)
+                    VALUES
+                        (%s, %s)
+                """ , (inserted_page_id, image_id))
+        else:
+            # If the data of the image exist, maybe it is also used in other article
+            # Let check article_image table first
+            for image_id in lc_cursor:
+                lc_cursor.execute("""
+                        SELECT
+                            id
+                        FROM
+                            article_image
+                        WHERE
+                            article_id = '%s' AND
+                            image_id = '%s'
+                    """ % (inserted_page_id, image_id[0]))
+
+                if (lc_cursor.rowcount == 0):
+                    lc_cursor.execute("""
+                        INSERT INTO
+                            article_image (article_id, image_id)
+                        VALUES
+                            (%s, %s)
+                    """ , (inserted_page_id, image_id[0]))
+
+
+def get_textblock_info(pageid, inserted_page_id):
+      # Connect
+    rm_db = MySQLdb.connect(host=RM_HOST_NAME,
+            user=RM_USER_NAME,
+            passwd=RM_USER_PWD,db=rm_database_name)
+
+    lc_db = MySQLdb.connect(host=LC_HOST_NAME,
+            user=LC_USER_NAME,
+            passwd=LC_USER_PWD,
+            db=lc_database_name)
+
+    # Cursors
+    lc_cursor = lc_db.cursor();
+    rm_cursor = rm_db.cursor();
     
-    
+    # Step 1 - Get textblock data
+    rm_cursor.execute("""
+        SELECT 
+            caption, textblock
+        FROM 
+            data_textblock
+        WHERE 
+            pageid = %s
+            AND datelastcurrent is null
+        ;
+        """ % pageid)
+
+    for textblock_data in rm_cursor:
+        lc_cursor.execute("""
+                SELECT
+                    id
+                FROM
+                    textblock
+                WHERE
+                    caption = '%s'
+                    AND textblock = '%s'
+            """ % (textblock_data[0], textblock_data[1]))
+
+        # If the textblock does not exist in textblock table, insert data into textblock and 
+        # article_textblock tables
+        if (lc_cursor.rowcount == 0):
+            lc_cursor.execute("""
+                    INSERT INTO
+                        textblock (caption, textblock)
+                    VALUES
+                        (%s, %s)
+                """, (textblock_data[0], textblock_data[1]))
+
+            textblock_id = lc_cursor.lastrowid
+
+            lc_cursor.execute("""
+                    INSERT INTO
+                        article_textblock (article_id, textblock_id)
+                    VALUES
+                        (%s, %s)
+                """, (inserted_page_id, textblock_id))
+        else:
+            # If the textblock is exactly similar to an exist textblock, insert into 
+            # article_textblock table only.
+            for textblock_id in lc_cursor:
+                lc_cursor.execute("""
+                        SELECT
+                            id
+                        FROM
+                            article_textblock
+                        WHERE
+                            article_id = '%s' AND
+                            textblock_id = '%s'
+                    """ % (inserted_page_id, textblock_id[0]))
+
+                if (lc_cursor.rowcount == 0):
+                    lc_cursor.execute("""
+                            INSERT INTO
+                                article_textblock (article_id, textblock_id)
+                            VALUES
+                                (%s, %s)
+                        """, (inserted_page_id, textblock_id[0]))
+
 if __name__ == "__main__":
     main()
